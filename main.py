@@ -338,12 +338,13 @@ class SonarObjectDetectionPipeline:
                 title="Detection Heatmap (All Frames)"
             )
     
-    def save_results(self, output_dir: str = "outputs") -> None:
+    def save_results(self, output_dir: str = "outputs", save_all_frames: bool = False) -> None:
         """
         Save processing results to disk
         
         Args:
             output_dir: Directory to save outputs
+            save_all_frames: If True, save all frames with detections, otherwise just samples
         """
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
@@ -381,20 +382,44 @@ class SonarObjectDetectionPipeline:
         
         logger.info(f"Saved detection data to {json_path}")
         
-        # Save sample visualizations
+        # Save visualizations
         if self.frames:
-            for i in [0, len(self.frames) // 2, len(self.frames) - 1]:
+            # Determine which frames to save
+            if save_all_frames:
+                # Save all frames that have detections
+                frames_to_save = [i for i, dets in enumerate(self.detections_per_frame) if len(dets) > 0]
+                if not frames_to_save:  # If no detections, save sample frames
+                    frames_to_save = [0, len(self.frames) // 2, len(self.frames) - 1]
+            else:
+                # Save sample frames (first, middle, last)
+                frames_to_save = [0, len(self.frames) // 2, len(self.frames) - 1]
+            
+            for i in frames_to_save:
                 if i < len(self.frames):
                     frame = self.frames[i]
                     detections = self.detections_per_frame[i] if i < len(self.detections_per_frame) else []
                     
-                    # Process and save
+                    # Get raw frame data
+                    raw_image = frame.intensity_data
+                    
+                    # Normalize raw image for saving
+                    raw_normalized = cv2.normalize(raw_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                    
+                    # Apply colormap to raw image for better visualization
+                    raw_colored = cv2.applyColorMap(raw_normalized, cv2.COLORMAP_VIRIDIS)
+                    
+                    # Save raw frame
+                    raw_path = output_path / f'{base_name}_frame_{i:04d}_raw.png'
+                    cv2.imwrite(str(raw_path), raw_colored)
+                    logger.info(f"Saved raw frame {i} to {raw_path}")
+                    
+                    # Process and save detection overlay
                     enhanced, _ = self.process_frame(frame)
                     output_img = self.visualizer.plot_detections_overlay(enhanced, detections)
                     
-                    img_path = output_path / f'{base_name}_frame_{i:04d}.png'
-                    cv2.imwrite(str(img_path), output_img)
-                    logger.info(f"Saved frame {i} to {img_path}")
+                    detection_path = output_path / f'{base_name}_frame_{i:04d}_detections.png'
+                    cv2.imwrite(str(detection_path), output_img)
+                    logger.info(f"Saved detection frame {i} to {detection_path}")
 
 
 def main():
@@ -417,6 +442,9 @@ def main():
     
     parser.add_argument('--output-dir', type=str, default='outputs',
                        help='Output directory')
+    
+    parser.add_argument('--save-all-frames', action='store_true',
+                       help='Save all frames with detections (not just samples)')
     
     parser.add_argument('--frames', type=int, nargs='+', default=None,
                        help='Specific frame indices to visualize')
@@ -465,7 +493,7 @@ def main():
     
     # Save outputs if requested
     if args.save_outputs:
-        pipeline.save_results(args.output_dir)
+        pipeline.save_results(args.output_dir, save_all_frames=args.save_all_frames)
     
     logger.info("Processing complete!")
     return 0
