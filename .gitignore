@@ -1,2 +1,4 @@
 raw_assets/
 sdk/
+outputs/
+src/__pycache__/

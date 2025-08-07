@@ -1,0 +1,45 @@
+# Oculus Sonar Object Detection Configuration
+
+# Filtering and enhancement settings
+filters:
+  median_kernel: 3  # Kernel size for median filter (odd number)
+  bilateral_d: 5  # Diameter for bilateral filter
+  bilateral_sigma_color: 50  # Color sigma for bilateral filter
+  bilateral_sigma_space: 50  # Space sigma for bilateral filter
+  normalize_percentiles: [2, 98]  # Percentiles for intensity normalization
+  remove_water_column: 10  # Number of range bins to remove (water column noise)
+  range_correction_alpha: 0.1  # Attenuation coefficient for range correction
+
+# Object detection settings
+detection:
+  methods: []  # General detection methods (set to empty to use only specialized)
+  # Available methods: 'classical', 'edge', 'cluster', 'yolo'
+  combine_method: 'union'  # How to combine detections: 'union', 'intersection', 'vote'
+  min_area: 500  # Minimum object area in pixels (increased to reduce small false positives)
+  max_area: 10000  # Maximum object area in pixels
+  confidence_threshold: 0.7  # Minimum confidence to accept detection (increased)
+  use_specialized: true  # Use specialized detector for spheres, barrels, and cubes
+  max_detections_per_frame: 5  # Maximum number of objects to detect per frame
+  min_intensity_mean: 120  # Minimum mean intensity for valid objects
+
+# Visualization settings
+visualization:
+  colormap: 'viridis'  # Matplotlib colormap for sonar data
+  show_realtime: true  # Enable real-time visualization
+  save_outputs: false  # Save outputs to disk
+  output_dir: 'outputs'  # Directory for saved outputs
+
+# Advanced settings
+advanced:
+  # Edge detection parameters
+  edge_low_threshold: 50
+  edge_high_threshold: 150
+  
+  # Clustering parameters
+  cluster_eps: 5.0  # DBSCAN epsilon (max distance between points)
+  cluster_min_samples: 10  # DBSCAN minimum samples per cluster
+  cluster_intensity_threshold: 100  # Minimum intensity for clustering
+  
+  # Shadow detection
+  shadow_threshold: 30  # Intensity threshold for shadow detection
+  min_shadow_length: 5  # Minimum consecutive dark pixels for shadow

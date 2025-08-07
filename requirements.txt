@@ -1,0 +1,31 @@
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+matplotlib>=3.7.0
+scipy>=1.10.0
+Pillow>=10.0.0
+
+# Image processing and filtering
+scikit-image>=0.21.0
+scikit-learn>=1.3.0
+
+# Deep learning for object detection
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0  # YOLOv8 for object detection
+
+# Data handling
+pandas>=2.0.0
+h5py>=3.9.0
+
+# Visualization
+plotly>=5.14.0
+seaborn>=0.12.0
+
+# Real-time processing
+pyqt5>=5.15.0
+pyqtgraph>=0.13.0
+
+# Progress bars and utilities
+tqdm>=4.65.0
+pyyaml>=6.0
