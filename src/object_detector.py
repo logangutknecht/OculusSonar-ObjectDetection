@@ -38,6 +38,8 @@ class DetectedObject:
     intensity_mean: float
     intensity_std: float
     frame_index: int
+    # Optional associated shadow bounding box (x, y, w, h) in image coords
+    shadow_bbox: Optional[Tuple[int, int, int, int]] = None
     
     @property
     def center(self) -> Tuple[float, float]:

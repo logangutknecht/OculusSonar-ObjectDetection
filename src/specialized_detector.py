@@ -265,7 +265,9 @@ class ShadowDetector:
     
     @staticmethod
     def detect_object_shadows(image: np.ndarray, object_bbox: Tuple[int, int, int, int],
-                             shadow_threshold: int = 50) -> Optional[Dict]:
+                             shadow_threshold: int = 50,
+                             min_relative_darkening: float = 0.35,
+                             min_length_ratio: float = 0.8) -> Optional[Dict]:
         """
         Detect shadow cast by an object
         
@@ -279,10 +281,10 @@ class ShadowDetector:
         """
         x, y, w, h = object_bbox
         
-        # Look for shadow behind the object (in sonar, typically below/to the right)
-        # Shadow search region
-        shadow_search_height = h * 2
-        shadow_search_width = w
+        # Look for shadow behind the object in range direction (in our 2D array, +y)
+        # Shadow search region sized relative to object box
+        shadow_search_height = int(h * 2.0)
+        shadow_search_width = int(max(w * 1.0, 8))
         
         # Define shadow search area
         shadow_y_start = y + h
@@ -296,10 +298,17 @@ class ShadowDetector:
         # Extract shadow region
         shadow_region = image[shadow_y_start:shadow_y_end, shadow_x_start:shadow_x_end]
         
-        # Check if region is darker than surroundings
+        # Adaptive threshold using local surroundings to be robust across frames
         mean_intensity = np.mean(shadow_region)
-        
-        if mean_intensity < shadow_threshold:
+        # Compute a local background just below the shadow region when possible
+        bg_y2 = min(shadow_y_end + h, image.shape[0])
+        bg_region = image[shadow_y_end:bg_y2, shadow_x_start:shadow_x_end]
+        bg_mean = float(np.mean(bg_region)) if bg_region.size > 0 else 100.0
+
+        # Consider it a shadow if the region is significantly darker than local background
+        darkening = 0 if bg_mean <= 1e-6 else (bg_mean - mean_intensity) / bg_mean
+        is_shadow = (mean_intensity + 10) < min(bg_mean, shadow_threshold) and darkening >= min_relative_darkening
+        if is_shadow:
             # Calculate shadow properties
             shadow_mask = shadow_region < shadow_threshold
             shadow_pixels = np.sum(shadow_mask)
@@ -309,6 +318,10 @@ class ShadowDetector:
                 shadow_coords = np.where(shadow_mask)
                 shadow_length = shadow_coords[0].max() - shadow_coords[0].min() if len(shadow_coords[0]) > 0 else 0
                 
+                # Enforce a minimum length relative to the object height (long shadow indicates volume)
+                if shadow_length < int(min_length_ratio * h):
+                    return None
+
                 return {
                     'bbox': (shadow_x_start, shadow_y_start, 
                             shadow_x_end - shadow_x_start, 
@@ -316,7 +329,8 @@ class ShadowDetector:
                     'mean_intensity': mean_intensity,
                     'pixel_count': shadow_pixels,
                     'length': shadow_length,
-                    'volume_indicator': shadow_length / h  # Ratio indicates object height
+                    'volume_indicator': shadow_length / max(h, 1),  # Ratio indicates object height
+                    'darkening': darkening
                 }
         
         return None
@@ -325,16 +339,25 @@ class ShadowDetector:
 class SpecializedSonarDetector:
     """Specialized detector for spheres, barrels, and cubes in sonar data"""
     
-    def __init__(self, shadow_analysis: bool = True):
+    def __init__(self, shadow_analysis: bool = True, shapes: Tuple[str, ...] = ("sphere",)):
         """
         Initialize specialized detector
         
         Args:
             shadow_analysis: Enable shadow-based volume detection
+            shapes: Tuple of shape names to detect ("sphere", "barrel", "cube")
         """
         self.shadow_analysis = shadow_analysis
+        self.enabled_shapes = set(shapes)
         self.shape_analyzer = ShapeAnalyzer()
         self.shadow_detector = ShadowDetector()
+        # Tunable thresholds for arc + shadow heuristic
+        # Initial conservative defaults; can be tuned if misses
+        self.bright_percentile = 92.0
+        self.min_arc_area = 40
+        self.shadow_low_percentile = 25.0
+        self.min_shadow_length_ratio = 0.6
+        self.min_shadow_darkening = 0.20
     
     def detect(self, image: np.ndarray, frame_index: int = 0) -> List[DetectedObject]:
         """
@@ -353,22 +376,144 @@ class SpecializedSonarDetector:
         processed = self._preprocess(image)
         
         # Detect spheres (crescents)
-        spheres = self._detect_spheres(processed, image, frame_index)
-        detections.extend(spheres)
+        if "sphere" in self.enabled_shapes:
+            # Simple and robust arc+shadow detector
+            spheres_simple = self._detect_spheres_arc_shadow_simple(processed, image, frame_index)
+            detections.extend(spheres_simple)
+            # Hough-based as a backup for cases the simple method misses
+            spheres_hough = self._detect_spheres(processed, image, frame_index)
+            # Add non-overlapping only
+            for d in spheres_hough:
+                if not any(self._iou(d.bbox, s.bbox) > 0.3 for s in spheres_simple):
+                    detections.append(d)
         
         # Detect barrels (ellipses)
-        barrels = self._detect_barrels(processed, image, frame_index)
-        detections.extend(barrels)
+        if "barrel" in self.enabled_shapes:
+            barrels = self._detect_barrels(processed, image, frame_index)
+            detections.extend(barrels)
         
         # Detect cubes (straight edges and corners)
-        cubes = self._detect_cubes(processed, image, frame_index)
-        detections.extend(cubes)
+        if "cube" in self.enabled_shapes:
+            cubes = self._detect_cubes(processed, image, frame_index)
+            detections.extend(cubes)
         
         # Analyze shadows for volume confirmation
         if self.shadow_analysis:
             detections = self._analyze_shadows(detections, image)
         
         return detections
+
+    def _detect_spheres_arc_shadow_simple(self, processed: np.ndarray, original: np.ndarray,
+                                          frame_index: int) -> List[DetectedObject]:
+        """Detect spheres using simple bright-arc + dark-shadow heuristic.
+
+        This avoids strict Hough parameters and relies on intensity percentiles
+        and connected components, then validates a long dark region below.
+        """
+        detections: List[DetectedObject] = []
+
+        # Bright candidates by high percentile
+        bright_thr = np.percentile(processed, self.bright_percentile)
+        bright_mask = (processed >= bright_thr).astype(np.uint8) * 255
+
+        # Clean small noise
+        kernel = np.ones((3, 3), np.uint8)
+        bright_mask = cv2.morphologyEx(bright_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # Connected components
+        num, labels, stats, centroids = cv2.connectedComponentsWithStats(bright_mask, connectivity=8)
+        h_img, w_img = processed.shape[:2]
+
+        for i in range(1, num):  # skip background
+            x, y, w, h, area = stats[i, 0], stats[i, 1], stats[i, 2], stats[i, 3], stats[i, 4]
+            if area < self.min_arc_area:
+                continue
+
+            # Arc-like aspect: not extremely wide or tall
+            if h > 0 and (w / max(h, 1) > 6.0 or h / max(w, 1) > 6.0):
+                continue
+
+            # Shadow search region directly below the bright region
+            shadow_y0 = min(y + h, h_img)
+            shadow_y1 = min(y + h + int(2.5 * h), h_img)
+            margin = int(0.5 * w)
+            shadow_x0 = max(0, x - margin)
+            shadow_x1 = min(w_img, x + w + margin)
+            if shadow_y1 <= shadow_y0 or shadow_x1 <= shadow_x0:
+                continue
+
+            shadow_region = original[shadow_y0:shadow_y1, shadow_x0:shadow_x1]
+            if shadow_region.size == 0:
+                continue
+
+            # Local background just below
+            bg_y2 = min(shadow_y1 + h, h_img)
+            bg_region = original[shadow_y1:bg_y2, shadow_x0:shadow_x1]
+            bg_mean = float(np.mean(bg_region)) if bg_region.size > 0 else float(np.mean(original))
+
+            # Local low-intensity threshold by percentile of shadow region
+            sh_low_thr = np.percentile(shadow_region, self.shadow_low_percentile)
+            shadow_mask = (shadow_region <= sh_low_thr).astype(np.uint8)
+
+            # Estimate shadow length: vertical run of any low pixels
+            rows_with_shadow = np.where(np.any(shadow_mask > 0, axis=1))[0]
+            if rows_with_shadow.size > 0:
+                shadow_len = int(rows_with_shadow.max() - rows_with_shadow.min() + 1)
+            else:
+                shadow_len = 0
+
+            mean_shadow = float(np.mean(shadow_region))
+            darkening = 0 if bg_mean <= 1e-6 else (bg_mean - mean_shadow) / bg_mean
+
+            if shadow_len >= int(self.min_shadow_length_ratio * h) and darkening >= self.min_shadow_darkening:
+                # Build detection
+                roi = original[y:y + h, x:x + w]
+                intensity_mean = float(np.mean(roi)) if roi.size > 0 else 0.0
+                intensity_std = float(np.std(roi)) if roi.size > 0 else 0.0
+                cx, cy = centroids[i]
+
+                # Confidence from bright area and shadow strength
+                arc_strength = min(1.0, (intensity_mean + 1e-6) / 255.0)
+                conf = float(np.clip(0.6 + 0.2 * darkening + 0.2 * (shadow_len / max(h, 1)), 0.0, 1.0))
+                conf = max(conf, arc_strength * 0.7)
+
+                # Expand arc bbox slightly so the drawn box wraps the visible arc
+                pad_w = int(0.15 * w)
+                pad_h = int(0.15 * h)
+                bx = max(0, int(x - pad_w))
+                by = max(0, int(y - pad_h))
+                bw = int(min(w_img - bx, w + 2 * pad_w))
+                bh = int(min(h_img - by, h + 2 * pad_h))
+
+                det = DetectedObject(
+                    bbox=(bx, by, bw, bh),
+                    confidence=conf,
+                    class_name="sphere",
+                    centroid=(float(cx), float(cy)),
+                    area=float(area),
+                    intensity_mean=intensity_mean,
+                    intensity_std=intensity_std,
+                    frame_index=frame_index,
+                    shadow_bbox=(int(shadow_x0), int(shadow_y0), int(shadow_x1 - shadow_x0), int(shadow_y1 - shadow_y0))
+                )
+                detections.append(det)
+
+        return detections
+
+    @staticmethod
+    def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        ax2, ay2 = ax + aw, ay + ah
+        bx2, by2 = bx + bw, by + bh
+        xi1, yi1 = max(ax, bx), max(ay, by)
+        xi2, yi2 = min(ax2, bx2), min(ay2, by2)
+        if xi2 <= xi1 or yi2 <= yi1:
+            return 0.0
+        inter = (xi2 - xi1) * (yi2 - yi1)
+        area_a = aw * ah
+        area_b = bw * bh
+        return inter / float(max(area_a + area_b - inter, 1))
     
     def _preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess image for shape detection"""
@@ -406,17 +551,22 @@ class SpecializedSonarDetector:
             
             # Only create detection if intensity is significant
             if intensity_mean > 120:  # Threshold for valid object
-                detection = DetectedObject(
-                    bbox=(x, y, w, h),
-                    confidence=0.75,  # Base confidence for sphere
-                    class_name="sphere",
-                    centroid=(cx, cy),
-                    area=np.pi * radius * radius,
-                    intensity_mean=intensity_mean,
-                    intensity_std=intensity_std,
-                    frame_index=frame_index
-                )
-                detections.append(detection)
+                # Require corresponding shadow directly behind the bright arc
+                shadow_info = self.shadow_detector.detect_object_shadows(original, (x, y, w, h)) if self.shadow_analysis else None
+
+                if shadow_info is not None:
+                    detection = DetectedObject(
+                        bbox=(x, y, w, h),
+                        confidence=0.85,  # Higher base when solid shadow is present
+                        class_name="sphere",
+                        centroid=(cx, cy),
+                        area=np.pi * radius * radius,
+                        intensity_mean=intensity_mean,
+                        intensity_std=intensity_std,
+                        frame_index=frame_index,
+                        shadow_bbox=shadow_info['bbox']
+                    )
+                    detections.append(detection)
         
         return detections
     
@@ -519,7 +669,22 @@ class SpecializedSonarDetector:
                         image: np.ndarray) -> List[DetectedObject]:
         """Analyze shadows to confirm object volume and adjust confidence"""
         for detection in detections:
-            shadow = self.shadow_detector.detect_object_shadows(image, detection.bbox)
+            # If sphere already validated with shadow, boost based on volume; otherwise check for others
+            shadow = None
+            if detection.shadow_bbox is not None:
+                # Build a shadow dict to reuse volume computation
+                sx, sy, sw, sh = detection.shadow_bbox
+                shadow_region = image[sy:sy+sh, sx:sx+sw]
+                if shadow_region.size > 0:
+                    shadow = {
+                        'bbox': detection.shadow_bbox,
+                        'mean_intensity': float(np.mean(shadow_region)),
+                        'pixel_count': int(np.sum(shadow_region < 50)),
+                        'length': sh,
+                        'volume_indicator': sh / max(detection.bbox[3], 1)
+                    }
+            else:
+                shadow = self.shadow_detector.detect_object_shadows(image, detection.bbox)
             
             if shadow:
                 # Increase confidence if shadow indicates volume
@@ -527,9 +692,10 @@ class SpecializedSonarDetector:
                 
                 if volume_indicator > 0.5:  # Significant shadow length
                     detection.confidence = min(detection.confidence * 1.3, 1.0)
-                    
-                    # Add shadow info to class name
-                    detection.class_name = f"{detection.class_name}_with_shadow"
+                    detection.shadow_bbox = shadow.get('bbox', detection.shadow_bbox)
+                    # Add shadow info to class name (idempotent)
+                    if not detection.class_name.endswith("_with_shadow"):
+                        detection.class_name = f"{detection.class_name}_with_shadow"
         
         return detections
 

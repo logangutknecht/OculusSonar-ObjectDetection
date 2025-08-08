@@ -48,7 +48,8 @@ class SonarObjectDetectionPipeline:
         self.reader = None
         self.enhancer = self._setup_enhancer()
         self.detector = self._setup_detector()
-        self.specialized_detector = SpecializedSonarDetector(shadow_analysis=True)
+        # Only detect spheres for now
+        self.specialized_detector = SpecializedSonarDetector(shadow_analysis=True, shapes=("sphere",))
         self.visualizer = SonarVisualizer()
         self.rt_visualizer = RealTimeVisualizer()
         
@@ -71,11 +72,13 @@ class SonarObjectDetectionPipeline:
                 'range_correction_alpha': 0.1
             },
             'detection': {
-                'methods': ['classical', 'edge', 'cluster'],
+                # Only use specialized detector (spheres) for now
+                'methods': [],
                 'combine_method': 'union',
-                'min_area': 100,
-                'max_area': 10000,
+                'min_area': 40000,  # Minimum area threshold
+                # 'max_area': None,  # Optional upper bound; leave unset to allow large objects
                 'confidence_threshold': 0.5,
+                'min_intensity_mean': 0,
                 'use_specialized': True  # Use specialized detector for spheres, barrels, cubes
             },
             'visualization': {
@@ -199,10 +202,9 @@ class SonarObjectDetectionPipeline:
         min_conf = self.config['detection']['confidence_threshold']
         detections = [d for d in detections if d.confidence >= min_conf]
         
-        # Filter by area
-        min_area = self.config['detection'].get('min_area', 100)
-        max_area = self.config['detection'].get('max_area', 10000)
-        detections = [d for d in detections if min_area <= d.area <= max_area]
+        # Apply minimum area threshold (no upper bound for now)
+        min_area = self.config['detection'].get('min_area', 40000)
+        detections = [d for d in detections if d.area >= min_area]
         
         # Filter by intensity
         min_intensity = self.config['detection'].get('min_intensity_mean', 100)
@@ -363,10 +365,12 @@ class SonarObjectDetectionPipeline:
                 'num_detections': len(detections),
                 'detections': [
                     {
-                        'bbox': [int(x) for x in det.bbox],  # Convert to int
+                        'bbox': [int(x) for x in det.bbox],
+                        'shadow_bbox': ([int(x) for x in det.shadow_bbox]
+                                        if getattr(det, 'shadow_bbox', None) is not None else None),
                         'confidence': float(det.confidence),
                         'class_name': det.class_name,
-                        'centroid': [float(x) for x in det.centroid],  # Convert to float
+                        'centroid': [float(x) for x in det.centroid],
                         'area': float(det.area),
                         'intensity_mean': float(det.intensity_mean),
                         'intensity_std': float(det.intensity_std)
@@ -385,14 +389,22 @@ class SonarObjectDetectionPipeline:
         # Save visualizations
         if self.frames:
             # Determine which frames to save
+            # By default, save ONLY frames where an object is clearly detected
+            # (sphere with a shadow and above confidence threshold). If none, save samples.
+            def is_clear_detection(dets: List[DetectedObject]) -> bool:
+                min_conf = self.config['detection'].get('confidence_threshold', 0.5)
+                for d in dets:
+                    if d.class_name.startswith('sphere') and getattr(d, 'shadow_bbox', None) is not None and d.confidence >= min_conf:
+                        return True
+                return False
+
+            detected_indices = [i for i, dets in enumerate(self.detections_per_frame) if is_clear_detection(dets)]
+
             if save_all_frames:
-                # Save all frames that have detections
-                frames_to_save = [i for i, dets in enumerate(self.detections_per_frame) if len(dets) > 0]
-                if not frames_to_save:  # If no detections, save sample frames
-                    frames_to_save = [0, len(self.frames) // 2, len(self.frames) - 1]
+                frames_to_save = detected_indices or [0, len(self.frames) // 2, len(self.frames) - 1]
             else:
-                # Save sample frames (first, middle, last)
-                frames_to_save = [0, len(self.frames) // 2, len(self.frames) - 1]
+                # Save only detected frames (fallback to a few samples if none)
+                frames_to_save = detected_indices or [0, len(self.frames) // 2, len(self.frames) - 1]
             
             for i in frames_to_save:
                 if i < len(self.frames):
@@ -413,9 +425,10 @@ class SonarObjectDetectionPipeline:
                     cv2.imwrite(str(raw_path), raw_colored)
                     logger.info(f"Saved raw frame {i} to {raw_path}")
                     
-                    # Process and save detection overlay
-                    enhanced, _ = self.process_frame(frame)
-                    output_img = self.visualizer.plot_detections_overlay(enhanced, detections)
+                    # Process and save detection overlay in rectangular view
+                    # Draw boxes on the VIRIDIS-colored image to make green/red visible
+                    overlay_base = raw_colored.copy()
+                    output_img = self.visualizer.plot_detections_overlay(overlay_base, detections)
                     
                     detection_path = output_path / f'{base_name}_frame_{i:04d}_detections.png'
                     cv2.imwrite(str(detection_path), output_img)

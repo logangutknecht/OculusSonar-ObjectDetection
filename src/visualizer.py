@@ -112,6 +112,78 @@ class SonarVisualizer:
         
         plt.tight_layout()
         plt.show()
+
+    def plot_polar_with_detections(self,
+                                   frame_data: np.ndarray,
+                                   bearings_deg: np.ndarray,
+                                   range_resolution: float,
+                                   detections: Optional[List] = None,
+                                   title: str = "Polar Sonar View with Detections"):
+        """
+        Plot sonar data in polar coordinates with detection overlays.
+
+        Overlays are drawn as annular sector outlines corresponding to each
+        detection's bounding box in range–bearing space. Associated shadow
+        boxes (if present) are drawn in red.
+        """
+        fig = plt.figure(figsize=self.figsize)
+        ax = fig.add_subplot(111, projection='polar')
+
+        # Create meshgrid for polar plot
+        ranges = np.arange(frame_data.shape[0]) * range_resolution
+        bearings_rad = np.radians(bearings_deg)
+        R, Theta = np.meshgrid(ranges, bearings_rad, indexing='ij')
+
+        # Plot sonar data
+        c = ax.pcolormesh(Theta, R, frame_data, cmap=self.colormap, shading='auto')
+        plt.colorbar(c, ax=ax, label='Intensity')
+
+        # Configure polar plot
+        ax.set_theta_zero_location('N')
+        ax.set_theta_direction(-1)  # Clockwise
+        ax.set_title(title)
+
+        # Draw detections
+        if detections:
+            for det in detections:
+                self._draw_bbox_polar(ax, det.bbox, bearings_deg, range_resolution, color=(0, 1, 0))
+                if getattr(det, 'shadow_bbox', None) is not None:
+                    self._draw_bbox_polar(ax, det.shadow_bbox, bearings_deg, range_resolution, color=(1, 0, 0))
+
+        plt.tight_layout()
+        return fig
+
+    def _draw_bbox_polar(self,
+                          ax,
+                          bbox: Tuple[int, int, int, int],
+                          bearings_deg: np.ndarray,
+                          range_resolution: float,
+                          color=(0, 1, 0)) -> None:
+        """Draw an axis-aligned bbox from range–bearing image as an annular sector.
+
+        bbox is (x, y, w, h) where x is bearing index, y is range index.
+        """
+        x, y, w, h = bbox
+        if w <= 0 or h <= 0:
+            return
+
+        b0 = max(0, min(len(bearings_deg) - 1, int(x)))
+        b1 = max(0, min(len(bearings_deg) - 1, int(x + w)))
+        # Ensure ordering
+        theta0 = np.radians(min(bearings_deg[b0], bearings_deg[b1]))
+        theta1 = np.radians(max(bearings_deg[b0], bearings_deg[b1]))
+
+        r0 = max(0.0, y * range_resolution)
+        r1 = max(r0 + 1e-6, (y + h) * range_resolution)
+
+        # Draw arcs at r0 and r1
+        theta = np.linspace(theta0, theta1, 100)
+        ax.plot(theta, np.full_like(theta, r0), color=color, linewidth=2)
+        ax.plot(theta, np.full_like(theta, r1), color=color, linewidth=2)
+
+        # Draw radial lines at theta0 and theta1
+        ax.plot([theta0, theta0], [r0, r1], color=color, linewidth=2)
+        ax.plot([theta1, theta1], [r0, r1], color=color, linewidth=2)
     
     def plot_detections_overlay(self, image: np.ndarray,
                                detections: List,
@@ -127,8 +199,8 @@ class SonarVisualizer:
         Returns:
             Image with overlaid detections
         """
-        # Convert to color if grayscale
-        if len(image.shape) == 2:
+        # Convert to color if grayscale; keep colormap if provided already
+        if len(image.shape) == 2 or (len(image.shape) == 3 and image.shape[2] == 1):
             output = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         else:
             output = image.copy()
@@ -148,6 +220,13 @@ class SonarVisualizer:
                 # Draw centroid
                 cx, cy = int(det.centroid[0]), int(det.centroid[1])
                 cv2.circle(output, (cx, cy), 3, (0, 255, 0), -1)
+
+                # If there is an associated shadow, draw it in red
+                if getattr(det, 'shadow_bbox', None) is not None:
+                    sx, sy, sw, sh = det.shadow_bbox
+                    cv2.rectangle(output, (sx, sy), (sx + sw, sy + sh), (0, 0, 255), 2)
+                    cv2.putText(output, 'shadow', (sx, max(0, sy-5)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
         
         return output
     
@@ -347,6 +426,11 @@ class RealTimeVisualizer:
         # Draw centroid
         cx, cy = int(detection.centroid[0]), int(detection.centroid[1])
         cv2.circle(image, (cx, cy), 3, (0, 255, 0), -1)
+
+        # Draw shadow box if available
+        if getattr(detection, 'shadow_bbox', None) is not None:
+            sx, sy, sw, sh = detection.shadow_bbox
+            cv2.rectangle(image, (sx, sy), (sx + sw, sy + sh), (0, 0, 255), 2)
 
 
 class DetectionAnalyzer:
