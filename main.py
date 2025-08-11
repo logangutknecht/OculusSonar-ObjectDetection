@@ -24,6 +24,14 @@ from object_detector import SonarObjectDetector, DetectedObject
 from specialized_detector import SpecializedSonarDetector
 from visualizer import SonarVisualizer, RealTimeVisualizer, DetectionAnalyzer
 
+# Import ML detector if available
+try:
+    from ml_detector.ml_sonar_detector import MLSonarDetector, HybridSonarDetector
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    logger.warning("ML detector not available. Install required dependencies or train a model first.")
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +58,34 @@ class SonarObjectDetectionPipeline:
         self.detector = self._setup_detector()
         # Only detect spheres for now
         self.specialized_detector = SpecializedSonarDetector(shadow_analysis=True, shapes=("sphere",))
+        
+        # Initialize ML detector if configured and available
+        self.ml_detector = None
+        self.hybrid_detector = None
+        if ML_AVAILABLE and self.config['detection'].get('use_ml', False):
+            ml_model_path = self.config['detection'].get('ml_model_path')
+            if ml_model_path and Path(ml_model_path).exists():
+                logger.info(f"Loading ML model from {ml_model_path}")
+                if self.config['detection'].get('use_hybrid', False):
+                    # Use hybrid detector combining ML and classical
+                    self.hybrid_detector = HybridSonarDetector(
+                        ml_model_path=ml_model_path,
+                        use_classical=True,
+                        use_specialized=True,
+                        fusion_method=self.config['detection'].get('fusion_method', 'weighted')
+                    )
+                    logger.info("Hybrid detector initialized (ML + Classical)")
+                else:
+                    # Use ML detector only
+                    self.ml_detector = MLSonarDetector(
+                        ml_model_path,
+                        confidence_threshold=self.config['detection'].get('ml_confidence_threshold', 0.25),
+                        iou_threshold=self.config['detection'].get('ml_iou_threshold', 0.45)
+                    )
+                    logger.info("ML detector initialized")
+            else:
+                logger.warning(f"ML model not found: {ml_model_path}")
+        
         self.visualizer = SonarVisualizer()
         self.rt_visualizer = RealTimeVisualizer()
         
@@ -79,7 +115,13 @@ class SonarObjectDetectionPipeline:
                 # 'max_area': None,  # Optional upper bound; leave unset to allow large objects
                 'confidence_threshold': 0.5,
                 'min_intensity_mean': 0,
-                'use_specialized': True  # Use specialized detector for spheres, barrels, cubes
+                'use_specialized': True,  # Use specialized detector for spheres, barrels, cubes
+                'use_ml': False,  # Use machine learning detector
+                'use_hybrid': False,  # Use hybrid (ML + Classical) detector
+                'ml_model_path': None,  # Path to trained ML model
+                'ml_confidence_threshold': 0.25,  # ML detection confidence threshold
+                'ml_iou_threshold': 0.45,  # ML NMS IOU threshold
+                'fusion_method': 'weighted'  # Method for hybrid detector ('weighted', 'voting', 'nms')
             },
             'visualization': {
                 'colormap': 'viridis',
@@ -176,27 +218,40 @@ class SonarObjectDetectionPipeline:
         # Apply enhancement filters
         enhanced = self.enhancer.process(enhanced)
         
-        # Detect objects
-        if self.config['detection'].get('use_specialized', False):
-            # Use specialized detector for specific shapes
-            detections = self.specialized_detector.detect(enhanced, frame.frame_index)
-            
-            # Also run general detectors if configured
-            if self.config['detection']['methods']:
-                general_detections = self.detector.detect(
+        # Detect objects based on configuration
+        detections = []
+        
+        # Use ML or Hybrid detector if configured
+        if self.config['detection'].get('use_ml', False):
+            if self.hybrid_detector is not None:
+                # Use hybrid detector (ML + Classical)
+                detections = self.hybrid_detector.detect(enhanced, frame.frame_index)
+            elif self.ml_detector is not None:
+                # Use ML detector only
+                detections = self.ml_detector.detect(enhanced, frame.frame_index, preprocess=True)
+        
+        # Fall back to classical methods if ML not used or no detections
+        if not detections:
+            if self.config['detection'].get('use_specialized', False):
+                # Use specialized detector for specific shapes
+                detections = self.specialized_detector.detect(enhanced, frame.frame_index)
+                
+                # Also run general detectors if configured
+                if self.config['detection']['methods']:
+                    general_detections = self.detector.detect(
+                        enhanced,
+                        frame.frame_index,
+                        combine_method=self.config['detection']['combine_method']
+                    )
+                    # Combine detections, prioritizing specialized ones
+                    detections.extend([d for d in general_detections 
+                                     if not any(self._overlaps(d, sd) for sd in detections)])
+            else:
+                detections = self.detector.detect(
                     enhanced,
                     frame.frame_index,
                     combine_method=self.config['detection']['combine_method']
                 )
-                # Combine detections, prioritizing specialized ones
-                detections.extend([d for d in general_detections 
-                                 if not any(self._overlaps(d, sd) for sd in detections)])
-        else:
-            detections = self.detector.detect(
-                enhanced,
-                frame.frame_index,
-                combine_method=self.config['detection']['combine_method']
-            )
         
         # Filter by confidence
         min_conf = self.config['detection']['confidence_threshold']
