@@ -48,8 +48,12 @@ class SonarObjectDetectionPipeline:
         self.reader = None
         self.enhancer = self._setup_enhancer()
         self.detector = self._setup_detector()
-        # Only detect spheres for now
-        self.specialized_detector = SpecializedSonarDetector(shadow_analysis=True, shapes=("sphere",))
+        # Only detect spheres for now. Enable optional brightest-front mode? set detect_brightest_front_only=True to use.
+        self.specialized_detector = SpecializedSonarDetector(
+            shadow_analysis=True,
+            shapes=("sphere",),
+            detect_brightest_front_only=False
+        )
         self.visualizer = SonarVisualizer()
         self.rt_visualizer = RealTimeVisualizer()
         

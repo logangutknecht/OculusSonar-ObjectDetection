@@ -339,7 +339,8 @@ class ShadowDetector:
 class SpecializedSonarDetector:
     """Specialized detector for spheres, barrels, and cubes in sonar data"""
     
-    def __init__(self, shadow_analysis: bool = True, shapes: Tuple[str, ...] = ("sphere",)):
+    def __init__(self, shadow_analysis: bool = True, shapes: Tuple[str, ...] = ("sphere",),
+                 detect_brightest_front_only: bool = False):
         """
         Initialize specialized detector
         
@@ -351,6 +352,7 @@ class SpecializedSonarDetector:
         self.enabled_shapes = set(shapes)
         self.shape_analyzer = ShapeAnalyzer()
         self.shadow_detector = ShadowDetector()
+        self.detect_brightest_front_only = detect_brightest_front_only
         # Tunable thresholds for arc + shadow heuristic
         # Initial conservative defaults; can be tuned if misses
         self.bright_percentile = 92.0
@@ -375,6 +377,10 @@ class SpecializedSonarDetector:
         # Preprocess image
         processed = self._preprocess(image)
         
+        # Optional mode: detect only the brightest front (no shadow requirement)
+        if self.detect_brightest_front_only:
+            return self._detect_brightest_front(image, frame_index)
+
         # Detect spheres (crescents)
         if "sphere" in self.enabled_shapes:
             # Simple and robust arc+shadow detector
@@ -401,6 +407,50 @@ class SpecializedSonarDetector:
         if self.shadow_analysis:
             detections = self._analyze_shadows(detections, image)
         
+        return detections
+
+    def _detect_brightest_front(self, image: np.ndarray, frame_index: int) -> List[DetectedObject]:
+        """Detect the brightest connected region and box it as the sphere front."""
+        if image.dtype != np.uint8:
+            img = (image * 255).astype(np.uint8) if image.max() <= 1 else image.astype(np.uint8)
+        else:
+            img = image
+
+        h, w = img.shape[:2]
+        detections: List[DetectedObject] = []
+
+        # Start at a very high percentile and relax if needed
+        for perc in (99.5, 99.0, 98.5, 98.0, 97.5):
+            thr = np.percentile(img, perc)
+            mask = (img >= thr).astype(np.uint8) * 255
+            # Clean speckle
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            num, labels, stats, cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            # Find largest area above a small minimum
+            cand = None
+            max_area = 0
+            for i in range(1, num):
+                x, y, bw, bh, area = stats[i]
+                if area > max_area and area >= 50:
+                    max_area = int(area)
+                    cand = (x, y, bw, bh, i)
+            if cand is not None:
+                x, y, bw, bh, idx = cand
+                cx, cy = cents[idx]
+                roi = img[y:y+bh, x:x+bw]
+                det = DetectedObject(
+                    bbox=(int(x), int(y), int(bw), int(bh)),
+                    confidence=float(np.clip(np.mean(roi) / 255.0, 0.6, 1.0)),
+                    class_name="sphere_front",
+                    centroid=(float(cx), float(cy)),
+                    area=float(max_area),
+                    intensity_mean=float(np.mean(roi)) if roi.size > 0 else 0.0,
+                    intensity_std=float(np.std(roi)) if roi.size > 0 else 0.0,
+                    frame_index=frame_index,
+                )
+                detections.append(det)
+                break
+
         return detections
 
     def _detect_spheres_arc_shadow_simple(self, processed: np.ndarray, original: np.ndarray,
