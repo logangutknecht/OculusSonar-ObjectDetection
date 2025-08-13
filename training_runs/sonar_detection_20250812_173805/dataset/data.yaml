@@ -1,0 +1,11 @@
+names:
+  0: object
+  1: sphere
+  2: barrel
+  3: cube
+  4: fish
+  5: debris
+nc: 6
+path: C:\Users\logan\OneDrive\Desktop\nav\repos\OculusSonar-ObjectDetection\training_runs\sonar_detection_20250812_173805\dataset
+train: train/images
+val: val/images

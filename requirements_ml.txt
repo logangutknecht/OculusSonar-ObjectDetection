@@ -1,0 +1,33 @@
+# Machine Learning Requirements for Sonar Object Detection
+# Install with: pip install -r requirements_ml.txt
+
+# Core ML frameworks
+ultralytics>=8.0.0      # YOLOv8 framework
+torch>=2.0.0           # PyTorch (will install CUDA version if available)
+torchvision>=0.15.0    # Computer vision models and transforms
+
+# Data processing
+opencv-python>=4.8.0   # Image processing
+numpy>=1.23.0          # Numerical computing
+scikit-learn>=1.3.0    # For train/test splitting
+matplotlib>=3.6.0      # Plotting and visualization
+Pillow>=10.0.0         # Image I/O
+
+# Configuration
+pyyaml>=6.0            # YAML config files
+
+# Optional but recommended
+tensorboard>=2.13.0    # Training visualization
+tqdm>=4.65.0          # Progress bars
+pandas>=2.0.0         # Data analysis
+
+# For GPU acceleration (optional, install manually if needed)
+# For NVIDIA GPUs:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# For Apple Silicon Macs:
+# pip install torch torchvision
+
+# Note: If you have CUDA-capable GPU, uninstall CPU torch and install GPU version:
+# pip uninstall torch torchvision
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
